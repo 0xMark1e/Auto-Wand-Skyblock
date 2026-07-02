@@ -79,7 +79,7 @@ inventory contents, networking, or server state directly.
 
 ## Credits
 
-Built with the help of [Claude Code](https://claude.com/claude-code).
+Built with the help of [Claude Code](https://claude.com/claude-code). ( yes i still know how to code, but this project doesnt need safety / optimisation )
 
 ## License
 
