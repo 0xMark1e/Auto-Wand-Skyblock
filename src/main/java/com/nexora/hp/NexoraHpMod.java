@@ -167,7 +167,7 @@ public class NexoraHpMod implements ClientModInitializer {
         int barHeight = 3;
         int margin = 8;
         int rowGap = 2;
-        int headerText = font.width("NEXORA HEAL");
+        int headerText = font.width("NEXORA-WAND");
         int contentWidth = Math.max(headerText + font.width(hpText) + 10, Math.max(font.width(label), 96));
         int boxWidth = contentWidth + padding * 2;
         int boxHeight = padding * 2 + font.lineHeight * 2 + rowGap * 2 + barHeight;
@@ -189,7 +189,7 @@ public class NexoraHpMod implements ClientModInitializer {
         graphics.outline(x1 + 1, y1 + 1, boxWidth - 2, boxHeight - 2, 0x30FFFFFF);
 
         int rowY = y1 + padding;
-        graphics.text(font, "NEXORA HEAL", x1 + padding, rowY, COLOR_HEADER);
+        graphics.text(font, "NEXORA-WAND", x1 + padding, rowY, COLOR_HEADER);
         graphics.text(font, hpText, x2 - padding - font.width(hpText), rowY, hpColor);
         rowY += font.lineHeight + rowGap;
 

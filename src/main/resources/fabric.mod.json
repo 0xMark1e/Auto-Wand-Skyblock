@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "nexora-hp",
+  "id": "nexora-wand",
   "version": "${version}",
-  "name": "Nexora HP",
-  "description": "Shows your current and max HP with /showhp.",
+  "name": "Nexora-Wand",
+  "description": "Auto-uses a healing item below a set HP% by simulating a hotbar switch and right-click.",
   "authors": ["Nexora"],
   "license": "MIT",
   "environment": "client",

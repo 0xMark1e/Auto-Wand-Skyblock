@@ -23,7 +23,7 @@ public class NexoraHpConfigScreen extends Screen {
     private int panelBottom;
 
     public NexoraHpConfigScreen(Screen parent) {
-        super(Component.literal("Nexora HP"));
+        super(Component.literal("Nexora-Wand"));
         this.parent = parent;
     }
 
@@ -124,7 +124,7 @@ public class NexoraHpConfigScreen extends Screen {
             graphics.horizontalLine(lineX1, panelX2 - 20, textY + this.font.lineHeight / 2, 0x40FFFFFF);
         }
 
-        graphics.centeredText(this.font, "Nexora HP • v1.0.0", centerX, this.panelBottom - 12, 0xFF55555F);
+        graphics.centeredText(this.font, "Nexora-Wand • v1.0.0", centerX, this.panelBottom - 12, 0xFF55555F);
 
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
     }

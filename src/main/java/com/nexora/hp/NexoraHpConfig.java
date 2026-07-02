@@ -10,7 +10,7 @@ import net.fabricmc.loader.api.FabricLoader;
 
 public final class NexoraHpConfig {
 
-    private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("nexora-hp.properties");
+    private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("nexora-wand.properties");
 
     public enum HudPosition {
         TOP_RIGHT, TOP_LEFT, BOTTOM_LEFT, BOTTOM_RIGHT;

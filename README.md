@@ -1,4 +1,4 @@
-# Nexora HP
+# Nexora-Wand
 
 ![Minecraft](https://img.shields.io/badge/Minecraft-26.1-3B9F3B?logo=minecraft&logoColor=white)
 ![Fabric](https://img.shields.io/badge/Loader-Fabric-3E7DDA)
@@ -39,7 +39,7 @@ state directly, so it behaves identically in singleplayer and multiplayer.
 
 1. Install [Fabric Loader](https://fabricmc.net/use/) for Minecraft 26.1.
 2. Drop [Fabric API](https://modrinth.com/mod/fabric-api) and the built
-   `nexora-hp-<version>.jar` into your `mods` folder.
+   `nexora-wand-<version>.jar` into your `mods` folder.
 3. Launch the game, then run `/nexora` to configure your heal item slot.
 
 ## Building from source
@@ -51,11 +51,11 @@ needed — Loom compiles directly against the game jar.
 ./gradlew build
 ```
 
-The output jar will be at `build/libs/nexora-hp-<version>.jar`.
+The output jar will be at `build/libs/nexora-wand-<version>.jar`.
 
 ## Configuration
 
-Settings live in `config/nexora-hp.properties` and are editable in-game via
+Settings live in `config/nexora-wand.properties` and are editable in-game via
 `/nexora`:
 
 | Setting | Description |
