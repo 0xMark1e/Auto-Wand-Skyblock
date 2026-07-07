@@ -14,15 +14,27 @@ state directly, so it behaves identically in singleplayer and multiplayer.
 
 ## Features
 
-- **Auto-heal** — below a configurable HP%, switches to a set hotbar slot,
-  simulates a right-click to use the item, then switches back to whatever
-  slot you had selected.
+- **Auto-heal** — below a configurable HP%, auto-detects whichever hotbar
+  slot holds your healing wand (any item whose internal ID starts with
+  `WAND_OF_`), switches to it, simulates a right-click to use it, then
+  switches back to whatever slot you had selected. No slot to configure —
+  move the wand around your hotbar freely.
 - **Cooldown-aware** — won't try again until the item's ability cooldown
   (configurable) has actually passed.
+- **Ragnarock-aware** — won't interrupt a held Ragnarock axe to heal;
+  waits until you switch away from it yourself (toggleable, on by default).
+- **Panic heal** — below a lower, separately configurable HP% (25% by
+  default), switches to your `FLORID_ZOMBIE_SWORD` and spams its
+  right-click ability until the server reports you're out of charges,
+  then waits out the reported recharge timer before trying again.
+  Overrides the normal cooldown/Ragnarock logic since it's a last resort.
 - **HUD indicator** — corner overlay (position configurable) showing live
-  HP%, heal-ready state, and a cooldown countdown bar.
+  HP%, heal-ready state, a cooldown countdown bar, and (if enabled) a
+  second row for panic-heal status.
 - **Sound notification** — optional chime when a heal fires.
 - **`/showhp`** — prints current/max HP to chat.
+- **`/getid`** — prints the internal Skyblock item ID of whatever you're
+  currently holding, for figuring out an item's ID.
 - **Settings screen** — `/nexora` in chat, or through
   [ModMenu](https://modrinth.com/mod/modmenu) if you have it installed.
 
@@ -40,7 +52,7 @@ state directly, so it behaves identically in singleplayer and multiplayer.
 1. Install [Fabric Loader](https://fabricmc.net/use/) for Minecraft 26.1.
 2. Drop [Fabric API](https://modrinth.com/mod/fabric-api) and the built
    `nexora-heal-<version>.jar` into your `mods` folder.
-3. Launch the game, then run `/nexora` to configure your heal item slot.
+3. Launch the game, then run `/nexora` to tune the threshold, cooldown, and other settings.
 
 ## Building from source
 
@@ -62,8 +74,10 @@ Settings live in `config/nexora-heal.properties` and are editable in-game via
 |---|---|
 | Auto-Heal | Master on/off toggle |
 | Heal Below % | HP percentage that triggers a heal attempt |
-| Heal Item Slot | Hotbar slot (1-9) holding the heal item |
 | Cooldown | Item's ability cooldown in seconds (mod waits cooldown + 0.5s before trying again) |
+| Avoid Ragnarock | Don't interrupt a held Ragnarock to heal (default on) |
+| Panic Heal | Master on/off toggle for the panic-heal sword |
+| Panic Below % | HP percentage that triggers a panic heal |
 | Heal Sound | Toggle the notification sound on heal |
 | HUD Position | Which screen corner the indicator is drawn in |
 

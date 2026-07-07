@@ -23,7 +23,8 @@ public class NexoraHpConfigScreen extends Screen {
 
     // Row counts per section, used to compute the panel's height up front so it's always
     // correctly centered and sized instead of relying on a hand-tuned starting offset.
-    private static final int GENERAL_ROWS = 3;
+    private static final int GENERAL_ROWS = 4;
+    private static final int PANIC_ROWS = 2;
     private static final int DISPLAY_ROWS = 2;
 
     private final Screen parent;
@@ -85,8 +86,13 @@ public class NexoraHpConfigScreen extends Screen {
     protected void init() {
         this.sectionHeaders.clear();
 
+        // "+ SPACING" here matches the extra gap the layout code below adds before the Done
+        // button (`y += SPACING + 12`) on top of DISPLAY's own rows -- missing that previously
+        // undersized the panel by exactly one row, leaving the Done button flush against the
+        // bottom border instead of padded above it.
         int contentHeight = sectionHeight(GENERAL_ROWS) + SECTION_GAP
-                + sectionHeight(DISPLAY_ROWS) + 12 + BUTTON_HEIGHT;
+                + sectionHeight(PANIC_ROWS) + SECTION_GAP
+                + sectionHeight(DISPLAY_ROWS) + SPACING + 12 + BUTTON_HEIGHT;
         int panelHeight = TITLE_HEIGHT + contentHeight + FOOTER_HEIGHT;
 
         int centerX = this.width / 2;
@@ -109,18 +115,32 @@ public class NexoraHpConfigScreen extends Screen {
                 percent -> NexoraHpConfig.healThresholdPercent = percent));
         y += SPACING;
 
-        Button slotButton = Button.builder(slotLabel(), b -> {
-            NexoraHpConfig.hotbarSlot = NexoraHpConfig.hotbarSlot % 9 + 1;
-            b.setMessage(slotLabel());
-        }).bounds(centerX - BUTTON_WIDTH / 2, y, BUTTON_WIDTH, BUTTON_HEIGHT).build();
-        this.addRenderableWidget(slotButton);
-        y += SPACING;
-
         Button cooldownButton = Button.builder(cooldownLabel(), b -> {
             NexoraHpConfig.cooldownSeconds = NexoraHpConfig.cooldownSeconds % 60 + 1;
             b.setMessage(cooldownLabel());
         }).bounds(centerX - BUTTON_WIDTH / 2, y, BUTTON_WIDTH, BUTTON_HEIGHT).build();
         this.addRenderableWidget(cooldownButton);
+        y += SPACING;
+
+        Button avoidRagnarockButton = Button.builder(avoidRagnarockLabel(), b -> {
+            NexoraHpConfig.avoidRagnarock = !NexoraHpConfig.avoidRagnarock;
+            b.setMessage(avoidRagnarockLabel());
+        }).bounds(centerX - BUTTON_WIDTH / 2, y, BUTTON_WIDTH, BUTTON_HEIGHT).build();
+        this.addRenderableWidget(avoidRagnarockButton);
+        y += SPACING + SECTION_GAP;
+
+        y = section(centerX, y, "PANIC HEAL");
+
+        Button panicEnabledButton = Button.builder(panicEnabledLabel(), b -> {
+            NexoraHpConfig.panicEnabled = !NexoraHpConfig.panicEnabled;
+            b.setMessage(panicEnabledLabel());
+        }).bounds(centerX - BUTTON_WIDTH / 2, y, BUTTON_WIDTH, BUTTON_HEIGHT).build();
+        this.addRenderableWidget(panicEnabledButton);
+        y += SPACING;
+
+        this.addRenderableWidget(new PercentSlider(centerX - BUTTON_WIDTH / 2, y, BUTTON_WIDTH, BUTTON_HEIGHT,
+                "Panic Below", 5, 90, NexoraHpConfig.panicThresholdPercent,
+                percent -> NexoraHpConfig.panicThresholdPercent = percent));
         y += SPACING + SECTION_GAP;
 
         y = section(centerX, y, "DISPLAY");
@@ -187,10 +207,6 @@ public class NexoraHpConfigScreen extends Screen {
         return Component.literal("Auto-Heal: " + (NexoraHpConfig.enabled ? "ON" : "OFF"));
     }
 
-    private static Component slotLabel() {
-        return Component.literal("Heal Item Slot: " + NexoraHpConfig.hotbarSlot);
-    }
-
     private static Component cooldownLabel() {
         return Component.literal("Cooldown: " + NexoraHpConfig.cooldownSeconds + "s");
     }
@@ -201,5 +217,13 @@ public class NexoraHpConfigScreen extends Screen {
 
     private static Component hudPositionLabel() {
         return Component.literal("HUD Position: " + NexoraHpConfig.hudPosition.name().replace('_', ' '));
+    }
+
+    private static Component avoidRagnarockLabel() {
+        return Component.literal("Avoid Ragnarock: " + (NexoraHpConfig.avoidRagnarock ? "ON" : "OFF"));
+    }
+
+    private static Component panicEnabledLabel() {
+        return Component.literal("Panic Heal: " + (NexoraHpConfig.panicEnabled ? "ON" : "OFF"));
     }
 }

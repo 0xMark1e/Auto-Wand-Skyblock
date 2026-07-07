@@ -23,10 +23,12 @@ public final class NexoraHpConfig {
 
     public static boolean enabled = true;
     public static int healThresholdPercent = 70;
-    public static int hotbarSlot = 3; // 1-indexed, as shown to the player
     public static int cooldownSeconds = 7;
     public static boolean soundEnabled = true;
     public static HudPosition hudPosition = HudPosition.TOP_RIGHT;
+    public static boolean avoidRagnarock = true;
+    public static boolean panicEnabled = true;
+    public static int panicThresholdPercent = 25;
 
     private NexoraHpConfig() {
     }
@@ -45,20 +47,24 @@ public final class NexoraHpConfig {
 
         enabled = Boolean.parseBoolean(props.getProperty("enabled", String.valueOf(enabled)));
         healThresholdPercent = clamp(parseInt(props.getProperty("healThresholdPercent"), healThresholdPercent), 10, 95);
-        hotbarSlot = clamp(parseInt(props.getProperty("hotbarSlot"), hotbarSlot), 1, 9);
         cooldownSeconds = clamp(parseInt(props.getProperty("cooldownSeconds"), cooldownSeconds), 1, 60);
         soundEnabled = Boolean.parseBoolean(props.getProperty("soundEnabled", String.valueOf(soundEnabled)));
         hudPosition = parseHudPosition(props.getProperty("hudPosition"), hudPosition);
+        avoidRagnarock = Boolean.parseBoolean(props.getProperty("avoidRagnarock", String.valueOf(avoidRagnarock)));
+        panicEnabled = Boolean.parseBoolean(props.getProperty("panicEnabled", String.valueOf(panicEnabled)));
+        panicThresholdPercent = clamp(parseInt(props.getProperty("panicThresholdPercent"), panicThresholdPercent), 5, 90);
     }
 
     public static void save() {
         Properties props = new Properties();
         props.setProperty("enabled", String.valueOf(enabled));
         props.setProperty("healThresholdPercent", String.valueOf(healThresholdPercent));
-        props.setProperty("hotbarSlot", String.valueOf(hotbarSlot));
         props.setProperty("cooldownSeconds", String.valueOf(cooldownSeconds));
         props.setProperty("soundEnabled", String.valueOf(soundEnabled));
         props.setProperty("hudPosition", hudPosition.name());
+        props.setProperty("avoidRagnarock", String.valueOf(avoidRagnarock));
+        props.setProperty("panicEnabled", String.valueOf(panicEnabled));
+        props.setProperty("panicThresholdPercent", String.valueOf(panicThresholdPercent));
 
         try (OutputStream out = Files.newOutputStream(CONFIG_PATH)) {
             props.store(out, "Nexora HP settings");

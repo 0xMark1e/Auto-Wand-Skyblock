@@ -3,11 +3,14 @@ package com.nexora.hp;
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.brigadier.context.CommandContext;
 import java.lang.reflect.Field;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.KeyMapping;
@@ -16,9 +19,14 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.CustomData;
 
 public class NexoraHpMod implements ClientModInitializer {
 
@@ -50,6 +58,24 @@ public class NexoraHpMod implements ClientModInitializer {
     private static long cooldownDurationMillis = 0L;
     private static boolean releasePending = false;
     private static int originalSlot = -1;
+    private static int wandSlot = -1;
+
+    // Panic heal: spams the "Instant Heal" sword's charges until the server tells us we're out,
+    // then waits until the reported recharge time before it's willing to try again.
+    private static final String SWORD_ID = "FLORID_ZOMBIE_SWORD";
+    private static final int PANIC_RETRY_DELAY_TICKS = 3;
+    private static final Pattern NO_CHARGES_PATTERN = Pattern.compile("next one in ([0-9.]+)s");
+
+    private static int swordSlot = -1;
+    private static boolean panicActive = false;
+    private static boolean panicReleasePending = false;
+    private static boolean panicRestorePending = false;
+    private static int panicRetryDelayTicks = 0;
+    private static int panicOriginalSlot = -1;
+    private static boolean panicCanHeal = true;
+    private static long panicCooldownEndsAt = 0L;
+    private static long panicCooldownDurationMillis = 0L;
+    private static volatile Double panicDepletedCooldownSeconds = null;
 
     @Override
     public void onInitializeClient() {
@@ -60,12 +86,28 @@ public class NexoraHpMod implements ClientModInitializer {
                     .executes(NexoraHpMod::showHp));
             dispatcher.register(ClientCommands.literal("nexora")
                     .executes(NexoraHpMod::openConfigScreen));
+            dispatcher.register(ClientCommands.literal("getid")
+                    .executes(NexoraHpMod::getId));
         });
 
         ClientTickEvents.END_CLIENT_TICK.register(NexoraHpMod::onClientTick);
 
+        // The item only tells us "no charges left" via a chat message (there's no NBT/component
+        // field for remaining charges), so that's what drives the panic-heal cooldown.
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> onChatMessage(message.getString()));
+        ClientReceiveMessageEvents.CHAT.register((message, signedMessage, sender, type, receptionTimestamp) ->
+                onChatMessage(message.getString()));
+
         HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("nexora-heal", "heal_indicator"),
                 (graphics, deltaTracker) -> renderHealIndicator(graphics));
+    }
+
+    private static void onChatMessage(String text) {
+        if (!panicActive || !text.contains("No more charges")) {
+            return;
+        }
+        Matcher matcher = NO_CHARGES_PATTERN.matcher(text);
+        panicDepletedCooldownSeconds = matcher.find() ? Double.parseDouble(matcher.group(1)) : 0.0;
     }
 
     private static void onClientTick(Minecraft client) {
@@ -91,6 +133,8 @@ public class NexoraHpMod implements ClientModInitializer {
             originalSlot = -1;
         }
 
+        tickPanic(client, player);
+
         if (!NexoraHpConfig.enabled) {
             needHeal = false;
             return;
@@ -105,9 +149,118 @@ public class NexoraHpMod implements ClientModInitializer {
         float maxHp = player.getMaxHealth();
         needHeal = maxHp > 0f && currentHp < maxHp * (NexoraHpConfig.healThresholdPercent / 100f);
 
-        if (needHeal && canHeal) {
-            triggerHeal(client, player, now);
+        wandSlot = findWandSlot(player.getInventory());
+
+        // Never interrupt a held Ragnarock -- wait until the player switches away from it
+        // themselves before switching to the heal item. Also don't fight the panic sequence
+        // over which hotbar slot is selected while it's mid-flight.
+        if (needHeal && canHeal && wandSlot >= 0 && !panicActive
+                && !(NexoraHpConfig.avoidRagnarock && isHoldingRagnarock(player))) {
+            triggerHeal(client, player, now, wandSlot);
         }
+    }
+
+    /**
+     * Panic heal: below a (lower) HP%, switch to the "Instant Heal" sword and spam its use key
+     * once every few ticks -- exactly like a player mashing right-click -- until the server's own
+     * "No more charges, next one in Xs!" message tells us to stop. That message is also the only
+     * place the recharge timer is exposed (there's no charges field in the item's data), so it
+     * drives the cooldown directly instead of us guessing a duration.
+     */
+    private static void tickPanic(Minecraft client, LocalPlayer player) {
+        long now = System.currentTimeMillis();
+
+        if (panicReleasePending) {
+            panicReleasePending = false;
+            KeyMapping.set(boundKey(client.options.keyUse), false);
+            panicRetryDelayTicks = PANIC_RETRY_DELAY_TICKS;
+        }
+
+        if (panicDepletedCooldownSeconds != null) {
+            double seconds = panicDepletedCooldownSeconds;
+            panicDepletedCooldownSeconds = null;
+            panicActive = false;
+            panicCanHeal = false;
+            panicCooldownDurationMillis = Math.round(seconds * 1000) + 500L;
+            panicCooldownEndsAt = now + panicCooldownDurationMillis;
+            panicRestorePending = true;
+        }
+
+        if (panicRestorePending) {
+            panicRestorePending = false;
+            if (panicOriginalSlot >= 0) {
+                KeyMapping.click(boundKey(client.options.keyHotbarSlots[panicOriginalSlot]));
+            }
+            panicOriginalSlot = -1;
+        }
+
+        if (!panicCanHeal && now >= panicCooldownEndsAt) {
+            panicCanHeal = true;
+        }
+
+        swordSlot = findSwordSlot(player.getInventory());
+
+        if (!NexoraHpConfig.enabled || !NexoraHpConfig.panicEnabled) {
+            return;
+        }
+
+        float maxHp = player.getMaxHealth();
+        boolean needPanic = maxHp > 0f && player.getHealth() < maxHp * (NexoraHpConfig.panicThresholdPercent / 100f);
+
+        if (!panicActive && needPanic && panicCanHeal && swordSlot >= 0) {
+            int selectedSlot = player.getInventory().getSelectedSlot();
+            if (selectedSlot != swordSlot) {
+                panicOriginalSlot = selectedSlot;
+                KeyMapping.click(boundKey(client.options.keyHotbarSlots[swordSlot]));
+            }
+            panicActive = true;
+            KeyMapping.set(boundKey(client.options.keyUse), true);
+            panicReleasePending = true;
+
+            if (NexoraHpConfig.soundEnabled) {
+                client.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.EXPERIENCE_ORB_PICKUP, 1.6F));
+            }
+        } else if (panicActive && !panicReleasePending) {
+            if (panicRetryDelayTicks > 0) {
+                panicRetryDelayTicks--;
+            } else {
+                KeyMapping.set(boundKey(client.options.keyUse), true);
+                panicReleasePending = true;
+            }
+        }
+    }
+
+    /** Exact-ID match: unlike the wand, there's only the one "Instant Heal" sword variant so far. */
+    private static int findSwordSlot(Inventory inventory) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (SWORD_ID.equals(extraAttributesId(inventory.getItem(slot)))) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static final String RAGNAROCK_ID = "RAGNAROCK_AXE";
+    private static final String WAND_ID_PREFIX = "WAND_OF_";
+
+    private static boolean isHoldingRagnarock(LocalPlayer player) {
+        return RAGNAROCK_ID.equals(extraAttributesId(player.getInventory().getSelectedItem()));
+    }
+
+    /**
+     * Scans the hotbar (slots 0-8) for an item whose internal ID starts with "WAND_OF_" --
+     * there are several wand variants (Wand of Restoration, Wand of Mending, ...) that all
+     * share this prefix, so it's a prefix match rather than an exact one. This replaces the
+     * old fixed-slot config: the wand can now sit in whatever hotbar slot the player likes.
+     */
+    private static int findWandSlot(Inventory inventory) {
+        for (int slot = 0; slot < 9; slot++) {
+            String id = extraAttributesId(inventory.getItem(slot));
+            if (id.startsWith(WAND_ID_PREFIX)) {
+                return slot;
+            }
+        }
+        return -1;
     }
 
     /** Releases the simulated right-click and, if we switched slots to heal, switches back. */
@@ -118,8 +271,7 @@ public class NexoraHpMod implements ClientModInitializer {
         }
     }
 
-    private static void triggerHeal(Minecraft client, LocalPlayer player, long now) {
-        int healSlotIndex = NexoraHpConfig.hotbarSlot - 1;
+    private static void triggerHeal(Minecraft client, LocalPlayer player, long now, int healSlotIndex) {
         int selectedSlot = player.getInventory().getSelectedSlot();
 
         // Simulate pressing the heal-item hotbar key, then the use-item (right click) key.
@@ -143,6 +295,7 @@ public class NexoraHpMod implements ClientModInitializer {
     private static final int COLOR_GREEN = 0xFF5CE65C;
     private static final int COLOR_RED = 0xFFE65C5C;
     private static final int COLOR_GRAY = 0xFF9A9AA5;
+    private static final int COLOR_AMBER = 0xFFF2B33D;
 
     private static void renderHealIndicator(GuiGraphicsExtractor graphics) {
         Minecraft client = Minecraft.getInstance();
@@ -152,8 +305,37 @@ public class NexoraHpMod implements ClientModInitializer {
         }
 
         boolean enabled = NexoraHpConfig.enabled;
-        String label = statusLabel(enabled, canHeal, "HEAL", cooldownEndsAt);
-        int barColor = statusColor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis);
+        String label;
+        int barColor;
+        float progress;
+        if (enabled && wandSlot < 0) {
+            label = "NO WAND";
+            barColor = COLOR_AMBER;
+            progress = 0f;
+        } else {
+            label = statusLabel(enabled, canHeal, "HEAL", cooldownEndsAt);
+            barColor = statusColor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis);
+            progress = progressFor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis);
+        }
+
+        boolean showPanicRow = NexoraHpConfig.panicEnabled;
+        String panicLabel = null;
+        int panicColor = 0;
+        float panicProgress = 0f;
+        if (showPanicRow) {
+            if (enabled && swordSlot < 0) {
+                panicLabel = "NO SWORD";
+                panicColor = COLOR_AMBER;
+            } else if (enabled && panicActive) {
+                panicLabel = "PANIC USING";
+                panicColor = COLOR_GREEN;
+                panicProgress = 1f;
+            } else {
+                panicLabel = statusLabel(enabled, panicCanHeal, "PANIC", panicCooldownEndsAt);
+                panicColor = statusColor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis);
+                panicProgress = progressFor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis);
+            }
+        }
 
         float hpRatio = player.getMaxHealth() > 0f ? player.getHealth() / player.getMaxHealth() : 0f;
         int hpColor = lerpColor(COLOR_RED, COLOR_GREEN, Math.max(0f, Math.min(1f, hpRatio)));
@@ -167,8 +349,13 @@ public class NexoraHpMod implements ClientModInitializer {
         int headerText = font.width("NEXORA-HEAL");
 
         int contentWidth = Math.max(headerText + font.width(hpText) + 10, Math.max(font.width(label), 96));
+        if (showPanicRow) {
+            contentWidth = Math.max(contentWidth, font.width(panicLabel));
+        }
         int boxWidth = contentWidth + padding * 2;
-        int boxHeight = padding * 2 + font.lineHeight * 2 + rowGap * 2 + barHeight;
+
+        int boxHeight = padding * 2 + font.lineHeight * (showPanicRow ? 3 : 2) + rowGap * (showPanicRow ? 4 : 2)
+                + barHeight * (showPanicRow ? 2 : 1);
 
         boolean right = NexoraHpConfig.hudPosition == NexoraHpConfig.HudPosition.TOP_RIGHT
                 || NexoraHpConfig.hudPosition == NexoraHpConfig.HudPosition.BOTTOM_RIGHT;
@@ -196,8 +383,14 @@ public class NexoraHpMod implements ClientModInitializer {
 
         graphics.text(font, label, x1 + padding, rowY, barColor);
         rowY += font.lineHeight + rowGap;
-        drawBar(graphics, barX1, barX2, rowY, barHeight, barColor,
-                progressFor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis));
+        rowY = drawBar(graphics, barX1, barX2, rowY, barHeight, barColor, progress);
+
+        if (showPanicRow) {
+            rowY += rowGap;
+            graphics.text(font, panicLabel, x1 + padding, rowY, panicColor);
+            rowY += font.lineHeight + rowGap;
+            drawBar(graphics, barX1, barX2, rowY, barHeight, panicColor, panicProgress);
+        }
     }
 
     private static String statusLabel(boolean enabled, boolean ready, String name, long cooldownEndsAt) {
@@ -271,6 +464,46 @@ public class NexoraHpMod implements ClientModInitializer {
                         .withStyle(ChatFormatting.GREEN));
 
         return 1;
+    }
+
+    private static int getId(CommandContext<FabricClientCommandSource> context) {
+        LocalPlayer player = context.getSource().getPlayer();
+        ItemStack held = player.getInventory().getSelectedItem();
+        String id = extraAttributesId(held);
+
+        if (id.isEmpty()) {
+            context.getSource().sendFeedback(
+                    Component.literal("[NEXORA] No internal ID found on held item")
+                            .withStyle(ChatFormatting.RED));
+        } else {
+            context.getSource().sendFeedback(
+                    Component.literal("[NEXORA] Item ID -> " + id)
+                            .withStyle(ChatFormatting.GREEN));
+        }
+
+        return 1;
+    }
+
+    /** Reads the Skyblock internal item ID (ExtraAttributes.id NBT tag) from an item stack. */
+    private static String extraAttributesId(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return "";
+        }
+
+        CustomData customData = stack.getComponents().get(DataComponents.CUSTOM_DATA);
+        if (customData == null || customData.isEmpty()) {
+            return "";
+        }
+
+        CompoundTag tag = customData.copyTag();
+
+        // Newer Hypixel data stores "id" directly on the custom-data root; older items nest it
+        // under "ExtraAttributes" instead. Try the direct key first, then fall back.
+        String directId = tag.getStringOr("id", "");
+        if (!directId.isEmpty()) {
+            return directId;
+        }
+        return tag.getCompoundOrEmpty("ExtraAttributes").getStringOr("id", "");
     }
 
     private static int openConfigScreen(CommandContext<FabricClientCommandSource> context) {
