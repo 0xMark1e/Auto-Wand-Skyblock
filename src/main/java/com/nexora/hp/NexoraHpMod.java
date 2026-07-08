@@ -3,6 +3,8 @@ package com.nexora.hp;
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.brigadier.context.CommandContext;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.fabricmc.api.ClientModInitializer;
@@ -24,9 +26,12 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.CustomData;
+import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.phys.AABB;
 
 public class NexoraHpMod implements ClientModInitializer {
 
@@ -77,6 +82,32 @@ public class NexoraHpMod implements ClientModInitializer {
     private static long panicCooldownDurationMillis = 0L;
     private static volatile Double panicDepletedCooldownSeconds = null;
 
+    // Blaze Slayer Hellion Shield: the boss (and its split demons) carry an invisible armor
+    // stand whose nametag directly names the currently-required dagger attunement, or "IMMUNE"
+    // while a split demon can't be damaged yet. Scanning for that nametag is how Skyblocker's
+    // own attunement highlighter works too -- there's no packet/NBT field for it otherwise.
+    private static final Pattern ATTUNEMENT_PATTERN = Pattern.compile("ASHEN|SPIRIT|CRYSTAL|AURIC|IMMUNE");
+    private static final double ATTUNEMENT_SCAN_RADIUS = 30.0;
+
+    private static String currentAttunement = null;
+
+    // Auto-attunement: the two Blaze Slayer daggers each toggle between two forms on right-click.
+    // The form is signaled by a "td_attune_mode" NBT tag (0-3, see AttunementController for the
+    // mapping) -- the item's vanilla material was documented as swapping between Stone/Golden/
+    // Iron/Diamond Sword to indicate it, but that turned out to be stale; the material never
+    // actually changes anymore, confirmed via /daggermode dumps. So we switch to whichever dagger
+    // the current attunement calls for, then tap right-click (a toggle, not a hold) if its tag
+    // doesn't already match. The decision logic itself lives in AttunementController, which is
+    // unit-tested and simulation-tested independently of Minecraft (see AttunementControllerTest)
+    // -- this class only gathers game state into an Input and turns the resulting IO calls into
+    // real key presses.
+    private static final String FIRE_DAGGER_ID = "HEARTFIRE_DAGGER";
+    private static final String TWILIGHT_DAGGER_ID = "HEARTMAW_DAGGER";
+
+    private static final AttunementController attunementController = new AttunementController();
+    private static int fireDaggerSlot = -1;
+    private static int twilightDaggerSlot = -1;
+
     @Override
     public void onInitializeClient() {
         NexoraHpConfig.load();
@@ -88,6 +119,8 @@ public class NexoraHpMod implements ClientModInitializer {
                     .executes(NexoraHpMod::openConfigScreen));
             dispatcher.register(ClientCommands.literal("getid")
                     .executes(NexoraHpMod::getId));
+            dispatcher.register(ClientCommands.literal("daggermode")
+                    .executes(NexoraHpMod::getDaggerMode));
         });
 
         ClientTickEvents.END_CLIENT_TICK.register(NexoraHpMod::onClientTick);
@@ -134,6 +167,7 @@ public class NexoraHpMod implements ClientModInitializer {
         }
 
         tickPanic(client, player);
+        scanAttunement(client, player);
 
         if (!NexoraHpConfig.enabled) {
             needHeal = false;
@@ -151,12 +185,24 @@ public class NexoraHpMod implements ClientModInitializer {
 
         wandSlot = findWandSlot(player.getInventory());
 
+        // Always let a pending attunement tap release on schedule, even on ticks where a heal is
+        // about to claim the use-key -- otherwise a heal firing right after a tap orphans that
+        // release, and the heal's own key handling can corrupt the in-flight dagger toggle
+        // (lands on the wrong mode) or desync our retry bookkeeping from the real key state
+        // (looks like spam/flicker). Only *starting new* attunement actions is gated below.
+        attunementController.flushRelease(attunementIo(client));
+
         // Never interrupt a held Ragnarock -- wait until the player switches away from it
         // themselves before switching to the heal item. Also don't fight the panic sequence
         // over which hotbar slot is selected while it's mid-flight.
-        if (needHeal && canHeal && wandSlot >= 0 && !panicActive
-                && !(NexoraHpConfig.avoidRagnarock && isHoldingRagnarock(player))) {
+        boolean willHeal = needHeal && canHeal && wandSlot >= 0 && !panicActive
+                && !(NexoraHpConfig.avoidRagnarock && isHoldingRagnarock(player));
+        if (willHeal) {
             triggerHeal(client, player, now, wandSlot);
+        } else {
+            // Only lets the attunement switcher touch the hotbar/use-key when nothing more
+            // important (panic heal, wand heal) is about to claim them this tick.
+            tickAttunementSwitch(client, player);
         }
     }
 
@@ -221,7 +267,13 @@ public class NexoraHpMod implements ClientModInitializer {
                 client.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.EXPERIENCE_ORB_PICKUP, 1.6F));
             }
         } else if (panicActive && !panicReleasePending) {
-            if (panicRetryDelayTicks > 0) {
+            // If the player manually switched off the sword mid-panic, stop spamming right-click
+            // on whatever they switched to -- respect the override instead of fighting it.
+            if (swordSlot < 0 || player.getInventory().getSelectedSlot() != swordSlot) {
+                panicActive = false;
+                panicRetryDelayTicks = 0;
+                panicOriginalSlot = -1;
+            } else if (panicRetryDelayTicks > 0) {
                 panicRetryDelayTicks--;
             } else {
                 KeyMapping.set(boundKey(client.options.keyUse), true);
@@ -230,14 +282,115 @@ public class NexoraHpMod implements ClientModInitializer {
         }
     }
 
-    /** Exact-ID match: unlike the wand, there's only the one "Instant Heal" sword variant so far. */
-    private static int findSwordSlot(Inventory inventory) {
+    /**
+     * Scans nearby armor stands for a Hellion Shield attunement nametag, preferring whichever
+     * matching one is physically closest, then debounces the result so a single stray tick (e.g.
+     * a stale armor stand not yet despawned during a phase transition) can't masquerade as a real
+     * requirement change. During a Demonsplit there can be two demons up with two different
+     * armor stands at once (one attunement, one "IMMUNE"); picking arbitrarily between them is
+     * what originally made this flicker even when nothing had actually changed.
+     */
+    private static void scanAttunement(Minecraft client, LocalPlayer player) {
+        if (!NexoraHpConfig.showAttunement && !NexoraHpConfig.autoAttunementEnabled) {
+            currentAttunement = null;
+            return;
+        }
+
+        AABB box = player.getBoundingBox().inflate(ATTUNEMENT_SCAN_RADIUS);
+        List<ArmorStand> stands = client.level.getEntities(EntityTypeTest.forClass(ArmorStand.class), box,
+                ArmorStand::hasCustomName);
+
+        List<AttunementController.Reading> readings = new ArrayList<>();
+        for (ArmorStand stand : stands) {
+            Matcher matcher = ATTUNEMENT_PATTERN.matcher(stand.getCustomName().getString());
+            if (matcher.find()) {
+                readings.add(new AttunementController.Reading(matcher.group(), stand.distanceToSqr(player)));
+            }
+        }
+
+        String detected = AttunementController.selectAttunement(readings);
+        currentAttunement = attunementController.debounceAttunement(detected);
+    }
+
+    /**
+     * Gathers game state into an AttunementController.Input and turns the resulting IO calls into
+     * real key presses. All the actual decision-making (when to switch, when to retry, when to
+     * back off) lives in AttunementController -- see AttunementControllerTest for its coverage.
+     */
+    private static void tickAttunementSwitch(Minecraft client, LocalPlayer player) {
+        attunementController.setConfirmWindowMillis(NexoraHpConfig.attunementSwitchDelayMillis);
+
+        fireDaggerSlot = findItemSlot(player.getInventory(), FIRE_DAGGER_ID);
+        twilightDaggerSlot = findItemSlot(player.getInventory(), TWILIGHT_DAGGER_ID);
+
+        String heldMode = daggerModeAttunement(player.getInventory().getSelectedItem());
+
+        AttunementController.Input input = new AttunementController.Input(
+                NexoraHpConfig.enabled,
+                NexoraHpConfig.autoAttunementEnabled,
+                NexoraHpConfig.avoidRagnarock,
+                isHoldingRagnarock(player),
+                panicActive,
+                currentAttunement,
+                fireDaggerSlot,
+                twilightDaggerSlot,
+                player.getInventory().getSelectedSlot(),
+                heldMode,
+                client.options.keyAttack.isDown(),
+                System.currentTimeMillis());
+
+        attunementController.tick(input, attunementIo(client));
+    }
+
+    private static AttunementController.IO attunementIo(Minecraft client) {
+        return new AttunementController.IO() {
+            @Override
+            public void releaseUseKey() {
+                KeyMapping.set(boundKey(client.options.keyUse), false);
+            }
+
+            @Override
+            public void switchToSlot(int slot) {
+                KeyMapping.click(boundKey(client.options.keyHotbarSlots[slot]));
+            }
+
+            @Override
+            public void tapUseKey() {
+                KeyMapping.set(boundKey(client.options.keyUse), true);
+            }
+        };
+    }
+
+    /**
+     * Reads the dagger's current toggle form off its "td_attune_mode" NBT tag. This used to read
+     * the item's vanilla material (documented as swapping between Stone/Golden/Iron/Diamond
+     * Sword), but /daggermode dumps proved that's stale -- the material never actually changes
+     * anymore, and Hypixel signals the mode through this dedicated tag instead.
+     */
+    private static String daggerModeAttunement(ItemStack stack) {
+        CustomData customData = stack.getComponents().get(DataComponents.CUSTOM_DATA);
+        if (customData == null || customData.isEmpty()) {
+            return null;
+        }
+        CompoundTag tag = customData.copyTag();
+        if (!tag.contains("td_attune_mode")) {
+            return null;
+        }
+        return AttunementController.daggerModeAttunement(tag.getIntOr("td_attune_mode", -1));
+    }
+
+    private static int findItemSlot(Inventory inventory, String id) {
         for (int slot = 0; slot < 9; slot++) {
-            if (SWORD_ID.equals(extraAttributesId(inventory.getItem(slot)))) {
+            if (id.equals(extraAttributesId(inventory.getItem(slot)))) {
                 return slot;
             }
         }
         return -1;
+    }
+
+    /** Exact-ID match: unlike the wand, there's only the one "Instant Heal" sword variant so far. */
+    private static int findSwordSlot(Inventory inventory) {
+        return findItemSlot(inventory, SWORD_ID);
     }
 
     private static final String RAGNAROCK_ID = "RAGNAROCK_AXE";
@@ -296,6 +449,21 @@ public class NexoraHpMod implements ClientModInitializer {
     private static final int COLOR_RED = 0xFFE65C5C;
     private static final int COLOR_GRAY = 0xFF9A9AA5;
     private static final int COLOR_AMBER = 0xFFF2B33D;
+    private static final int COLOR_ASHEN = 0xFFC2C2CC;
+    private static final int COLOR_SPIRIT = 0xFFF5F5F5;
+    private static final int COLOR_CRYSTAL = 0xFF5CE6E6;
+    private static final int COLOR_ACCENT = 0xFF5CE6C7;
+
+    /** One row of the HUD: a colored label, and optionally a colored progress bar beneath it. */
+    private record HudRow(String label, int color, boolean hasBar, float progress) {
+        private static HudRow text(String label, int color) {
+            return new HudRow(label, color, false, 0f);
+        }
+
+        private static HudRow bar(String label, int color, float progress) {
+            return new HudRow(label, color, true, progress);
+        }
+    }
 
     private static void renderHealIndicator(GuiGraphicsExtractor graphics) {
         Minecraft client = Minecraft.getInstance();
@@ -305,35 +473,38 @@ public class NexoraHpMod implements ClientModInitializer {
         }
 
         boolean enabled = NexoraHpConfig.enabled;
-        String label;
-        int barColor;
-        float progress;
+        List<HudRow> rows = new ArrayList<>();
+
         if (enabled && wandSlot < 0) {
-            label = "NO WAND";
-            barColor = COLOR_AMBER;
-            progress = 0f;
+            rows.add(HudRow.bar("NO WAND", COLOR_AMBER, 0f));
         } else {
-            label = statusLabel(enabled, canHeal, "HEAL", cooldownEndsAt);
-            barColor = statusColor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis);
-            progress = progressFor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis);
+            rows.add(HudRow.bar(statusLabel(enabled, canHeal, "HEAL", cooldownEndsAt),
+                    statusColor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis),
+                    progressFor(enabled, canHeal, cooldownEndsAt, cooldownDurationMillis)));
         }
 
-        boolean showPanicRow = NexoraHpConfig.panicEnabled;
-        String panicLabel = null;
-        int panicColor = 0;
-        float panicProgress = 0f;
-        if (showPanicRow) {
+        if (NexoraHpConfig.panicEnabled) {
             if (enabled && swordSlot < 0) {
-                panicLabel = "NO SWORD";
-                panicColor = COLOR_AMBER;
+                rows.add(HudRow.bar("NO SWORD", COLOR_AMBER, 0f));
             } else if (enabled && panicActive) {
-                panicLabel = "PANIC USING";
-                panicColor = COLOR_GREEN;
-                panicProgress = 1f;
+                rows.add(HudRow.bar("PANIC USING", COLOR_GREEN, 1f));
             } else {
-                panicLabel = statusLabel(enabled, panicCanHeal, "PANIC", panicCooldownEndsAt);
-                panicColor = statusColor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis);
-                panicProgress = progressFor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis);
+                rows.add(HudRow.bar(statusLabel(enabled, panicCanHeal, "PANIC", panicCooldownEndsAt),
+                        statusColor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis),
+                        progressFor(enabled, panicCanHeal, panicCooldownEndsAt, panicCooldownDurationMillis)));
+            }
+        }
+
+        if (NexoraHpConfig.showAttunement && currentAttunement != null) {
+            String label = "IMMUNE".equals(currentAttunement) ? "BOSS IMMUNE" : "ATTUNEMENT: " + currentAttunement;
+            rows.add(HudRow.text(label, attunementColor(currentAttunement)));
+        }
+
+        if (enabled && NexoraHpConfig.autoAttunementEnabled && currentAttunement != null
+                && !"IMMUNE".equals(currentAttunement)) {
+            boolean fireFamily = "ASHEN".equals(currentAttunement) || "AURIC".equals(currentAttunement);
+            if ((fireFamily ? fireDaggerSlot : twilightDaggerSlot) < 0) {
+                rows.add(HudRow.text("NO DAGGER", COLOR_AMBER));
             }
         }
 
@@ -342,20 +513,36 @@ public class NexoraHpMod implements ClientModInitializer {
         String hpText = Math.round(hpRatio * 100f) + "%";
 
         Font font = client.font;
-        int padding = 5;
+        int padding = 6;
         int barHeight = 3;
         int margin = 8;
-        int rowGap = 2;
-        int headerText = font.width("NEXORA-HEAL");
+        int rowGap = 4;
+        int ledSize = 4;
+        int ledGap = 4;
+        int textIndent = ledSize + ledGap;
+        // Measure the header with its actual "§l" bold prefix -- bold glyphs render wider than
+        // the plain text, so measuring the plain string undersized the box and let the HP% text
+        // crowd into the title.
+        int headerText = font.width("§lNEXORA-HEAL");
 
-        int contentWidth = Math.max(headerText + font.width(hpText) + 10, Math.max(font.width(label), 96));
-        if (showPanicRow) {
-            contentWidth = Math.max(contentWidth, font.width(panicLabel));
+        int contentWidth = Math.max(headerText + font.width(hpText) + 10, 100);
+        for (HudRow row : rows) {
+            contentWidth = Math.max(contentWidth, textIndent + font.width(row.label()));
         }
         int boxWidth = contentWidth + padding * 2;
 
-        int boxHeight = padding * 2 + font.lineHeight * (showPanicRow ? 3 : 2) + rowGap * (showPanicRow ? 4 : 2)
-                + barHeight * (showPanicRow ? 2 : 1);
+        // Sizing mirrors the exact draw sequence below step for step (same increments, same
+        // order) instead of separately counting "elements" and gaps, so the two can never drift
+        // out of sync -- that drift previously undercounted a gap and packed rows too tightly.
+        int contentHeight = font.lineHeight + 2; // header line + clearance before the divider
+        contentHeight += rowGap + barHeight; // divider-to-HP-bar gap, then the HP bar itself
+        for (HudRow row : rows) {
+            contentHeight += rowGap + font.lineHeight;
+            if (row.hasBar()) {
+                contentHeight += rowGap + barHeight;
+            }
+        }
+        int boxHeight = padding * 2 + contentHeight;
 
         boolean right = NexoraHpConfig.hudPosition == NexoraHpConfig.HudPosition.TOP_RIGHT
                 || NexoraHpConfig.hudPosition == NexoraHpConfig.HudPosition.BOTTOM_RIGHT;
@@ -367,30 +554,68 @@ public class NexoraHpMod implements ClientModInitializer {
         int y1 = bottom ? graphics.guiHeight() - margin - boxHeight : margin;
         int y2 = y1 + boxHeight;
 
-        // Panel: soft vertical gradient fill with a status-colored border.
-        // NOTE: outline() takes (x, y, width, height, color), not a second x/y corner.
-        graphics.fillGradient(x1, y1, x2, y2, 0xE0141420, 0xE00A0A12);
-        graphics.outline(x1, y1, boxWidth, boxHeight, (barColor & 0x00FFFFFF) | 0x60000000);
-        graphics.outline(x1 + 1, y1 + 1, boxWidth - 2, boxHeight - 2, 0x30FFFFFF);
+        // Panel: dark gradient fill, a faint full outline for structure, and pulsing accent
+        // corner brackets on top for a tactical-HUD look.
+        graphics.fillGradient(x1, y1, x2, y2, 0xEC12121C, 0xEC08080D);
+        graphics.outline(x1, y1, boxWidth, boxHeight, 0x22FFFFFF);
+
+        float pulse = 0.75f + 0.25f * (float) Math.sin(System.currentTimeMillis() / 260.0);
+        int bracketColor = (Math.round(pulse * 0xFF) << 24) | (COLOR_ACCENT & 0x00FFFFFF);
+        drawCornerBrackets(graphics, x1, y1, x2, y2, Math.min(10, boxWidth / 4), bracketColor);
 
         int barX1 = x1 + padding;
         int barX2 = x2 - padding;
 
         int rowY = y1 + padding;
-        graphics.text(font, "NEXORA-HEAL", x1 + padding, rowY, COLOR_HEADER);
+        graphics.text(font, "§lNEXORA-HEAL", x1 + padding, rowY, COLOR_ACCENT);
         graphics.text(font, hpText, x2 - padding - font.width(hpText), rowY, hpColor);
-        rowY += font.lineHeight + rowGap;
+        rowY += font.lineHeight + 2;
+        graphics.fill(barX1, rowY - 1, barX2, rowY, (COLOR_ACCENT & 0x00FFFFFF) | 0x50000000);
+        rowY += rowGap;
+        rowY = drawSegmentedBar(graphics, barX1, barX2, rowY, barHeight, hpColor, hpRatio);
 
-        graphics.text(font, label, x1 + padding, rowY, barColor);
-        rowY += font.lineHeight + rowGap;
-        rowY = drawBar(graphics, barX1, barX2, rowY, barHeight, barColor, progress);
-
-        if (showPanicRow) {
+        for (HudRow row : rows) {
             rowY += rowGap;
-            graphics.text(font, panicLabel, x1 + padding, rowY, panicColor);
-            rowY += font.lineHeight + rowGap;
-            drawBar(graphics, barX1, barX2, rowY, barHeight, panicColor, panicProgress);
+            drawLed(graphics, x1 + padding, rowY + 1, ledSize, row.color());
+            graphics.text(font, row.label(), x1 + padding + textIndent, rowY, row.color());
+            rowY += font.lineHeight;
+            if (row.hasBar()) {
+                rowY += rowGap;
+                rowY = drawSegmentedBar(graphics, barX1, barX2, rowY, barHeight, row.color(), row.progress());
+            }
         }
+    }
+
+    /** A small square status LED with a soft glow behind it, instead of relying on font glyph coverage. */
+    private static void drawLed(GuiGraphicsExtractor graphics, int x, int y, int size, int color) {
+        int glow = (color & 0x00FFFFFF) | 0x40000000;
+        graphics.fill(x - 1, y - 1, x + size + 1, y + size + 1, glow);
+        graphics.fill(x, y, x + size, y + size, color | 0xFF000000);
+    }
+
+    /** Four accent-colored corner brackets instead of a full border -- reads as HUD, not a dialog box. */
+    private static void drawCornerBrackets(GuiGraphicsExtractor graphics, int x1, int y1, int x2, int y2, int len,
+            int color) {
+        int t = 1;
+        graphics.fill(x1, y1, x1 + len, y1 + t, color);
+        graphics.fill(x1, y1, x1 + t, y1 + len, color);
+        graphics.fill(x2 - len, y1, x2, y1 + t, color);
+        graphics.fill(x2 - t, y1, x2, y1 + len, color);
+        graphics.fill(x1, y2 - t, x1 + len, y2, color);
+        graphics.fill(x1, y2 - len, x1 + t, y2, color);
+        graphics.fill(x2 - len, y2 - t, x2, y2, color);
+        graphics.fill(x2 - t, y2 - len, x2, y2, color);
+    }
+
+    private static int attunementColor(String attunement) {
+        return switch (attunement) {
+            case "ASHEN" -> COLOR_ASHEN;
+            case "SPIRIT" -> COLOR_SPIRIT;
+            case "CRYSTAL" -> COLOR_CRYSTAL;
+            case "AURIC" -> COLOR_AMBER;
+            case "IMMUNE" -> COLOR_RED;
+            default -> COLOR_GRAY;
+        };
     }
 
     private static String statusLabel(boolean enabled, boolean ready, String name, long cooldownEndsAt) {
@@ -425,13 +650,31 @@ public class NexoraHpMod implements ClientModInitializer {
         return cooldownDurationMillis > 0 ? 1f - (remainingMillis / (float) cooldownDurationMillis) : 1f;
     }
 
-    private static int drawBar(GuiGraphicsExtractor graphics, int x1, int x2, int y, int height, int color, float progress) {
-        graphics.fill(x1, y, x2, y + height, 0xFF25252F);
-        int filledWidth = Math.round((x2 - x1) * Math.max(0f, Math.min(1f, progress)));
-        if (filledWidth > 0) {
-            graphics.fillGradient(x1, y, x1 + filledWidth, y + height, color, dim(color));
+    /** A "tech" tick-bar: small lit/unlit blocks instead of one solid fill, sized to the given width. */
+    private static int drawSegmentedBar(GuiGraphicsExtractor graphics, int x1, int x2, int y, int height, int color,
+            float progress) {
+        int width = x2 - x1;
+        int segments = Math.max(6, width / 7);
+        int gap = 1;
+        float segWidth = (width - gap * (segments - 1)) / (float) segments;
+        int lit = Math.round(segments * Math.max(0f, Math.min(1f, progress)));
+
+        for (int i = 0; i < segments; i++) {
+            int sx1 = x1 + Math.round(i * (segWidth + gap));
+            int sx2 = Math.round(x1 + i * (segWidth + gap) + segWidth);
+            if (i < lit) {
+                boolean tip = i == lit - 1;
+                graphics.fill(sx1, y, sx2, y + height, tip ? brighten(color) : color);
+            } else {
+                graphics.fill(sx1, y, sx2, y + height, 0xFF25252F);
+            }
         }
         return y + height;
+    }
+
+    private static int brighten(int color) {
+        int a = (color >> 24) & 0xFF, r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
+        return (a << 24) | (Math.min(255, r + 40) << 16) | (Math.min(255, g + 40) << 8) | Math.min(255, b + 40);
     }
 
     private static int lerpColor(int colorA, int colorB, float t) {
@@ -443,11 +686,6 @@ public class NexoraHpMod implements ClientModInitializer {
         int g = Math.round(gA + (gB - gA) * t);
         int b = Math.round(bA + (bB - bA) * t);
         return (a << 24) | (r << 16) | (g << 8) | b;
-    }
-
-    private static int dim(int color) {
-        int a = (color >> 24) & 0xFF, r = (color >> 16) & 0xFF, g = (color >> 8) & 0xFF, b = color & 0xFF;
-        return (a << 24) | (r * 3 / 4 << 16) | (g * 3 / 4 << 8) | (b * 3 / 4);
     }
 
     private static int showHp(CommandContext<FabricClientCommandSource> context) {
@@ -479,6 +717,44 @@ public class NexoraHpMod implements ClientModInitializer {
             context.getSource().sendFeedback(
                     Component.literal("[NEXORA] Item ID -> " + id)
                             .withStyle(ChatFormatting.GREEN));
+        }
+
+        return 1;
+    }
+
+    /**
+     * Temporary diagnostic command: dumps the held item's actual vanilla item ID and full raw
+     * NBT. The dagger-mode detection assumes right-clicking swaps the underlying vanilla material
+     * (stone/gold/iron/diamond sword) -- if that's no longer how Hypixel signals the mode, this
+     * is how we'd see it: run it once per mode (toggle manually, run again) and diff the output.
+     */
+    private static int getDaggerMode(CommandContext<FabricClientCommandSource> context) {
+        LocalPlayer player = context.getSource().getPlayer();
+        ItemStack held = player.getInventory().getSelectedItem();
+
+        if (held.isEmpty()) {
+            context.getSource().sendFeedback(
+                    Component.literal("[NEXORA] You're not holding anything").withStyle(ChatFormatting.RED));
+            return 1;
+        }
+
+        context.getSource().sendFeedback(
+                Component.literal("[NEXORA] Vanilla item -> " + held.getItem())
+                        .withStyle(ChatFormatting.GREEN));
+
+        CustomData customData = held.getComponents().get(DataComponents.CUSTOM_DATA);
+        if (customData == null || customData.isEmpty()) {
+            context.getSource().sendFeedback(
+                    Component.literal("[NEXORA] No custom NBT data component").withStyle(ChatFormatting.YELLOW));
+            return 1;
+        }
+
+        String snbt = customData.copyTag().toString();
+        context.getSource().sendFeedback(Component.literal("[NEXORA] NBT (" + snbt.length() + " chars):"));
+        for (int i = 0; i < snbt.length(); i += 400) {
+            context.getSource().sendFeedback(
+                    Component.literal(snbt.substring(i, Math.min(i + 400, snbt.length())))
+                            .withStyle(ChatFormatting.GRAY));
         }
 
         return 1;

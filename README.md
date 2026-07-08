@@ -32,11 +32,22 @@ state directly, so it behaves identically in singleplayer and multiplayer.
   HP%, heal-ready state, a cooldown countdown bar, and (if enabled) a
   second row for panic-heal status.
 - **Sound notification** — optional chime when a heal fires.
+- **Blaze Slayer auto-attunement** — reads the Hellion Shield boss's
+  attunement (Ashen/Auric/Spirit/Crystal) off its nametag and keeps your
+  `HEARTFIRE_DAGGER`/`HEARTMAW_DAGGER` switched to whichever dagger and
+  toggle state matches it, simulating the same right-click-to-toggle input
+  you'd use by hand. Debounced against nametag flicker, backs off after
+  repeated failed attempts instead of spamming, and won't fire mid-panic-heal
+  or while holding Ragnarock (if avoidance is on).
 - **`/showhp`** — prints current/max HP to chat.
 - **`/getid`** — prints the internal Skyblock item ID of whatever you're
   currently holding, for figuring out an item's ID.
+- **`/daggermode`** — prints the held dagger's vanilla item type and full
+  NBT, for diagnosing attunement-detection issues.
 - **Settings screen** — `/nexora` in chat, or through
   [ModMenu](https://modrinth.com/mod/modmenu) if you have it installed.
+  Split into a **Healing** tab (auto-heal, panic heal, HUD) and a
+  **Blaze Slayer** tab (auto-attunement).
 
 ## Requirements
 
@@ -80,6 +91,9 @@ Settings live in `config/nexora-heal.properties` and are editable in-game via
 | Panic Below % | HP percentage that triggers a panic heal |
 | Heal Sound | Toggle the notification sound on heal |
 | HUD Position | Which screen corner the indicator is drawn in |
+| Auto Attunement | Master on/off toggle for Blaze Slayer dagger auto-switching |
+| Swap Delay | How long to wait between toggle attempts (ms) |
+| Show Attunement | Toggle the boss's current attunement in the HUD |
 
 ## How it works
 
@@ -90,6 +104,15 @@ real press — `KeyMapping.click(...)` for the hotbar switch and
 processing takes it from there: switching slots, starting the item use, and
 sending whatever packets that naturally implies. The mod never touches
 inventory contents, networking, or server state directly.
+
+The attunement switcher's decision logic (`AttunementController`) is kept
+free of Minecraft types so it can be unit tested in isolation, without Loom
+or a game jar on the classpath — see `src/test/java`, run with:
+
+```
+javac -d /tmp/out src/main/java/com/nexora/hp/AttunementController.java src/test/java/com/nexora/hp/AttunementControllerTest.java
+java -cp /tmp/out com.nexora.hp.AttunementControllerTest
+```
 
 ## Credits
 

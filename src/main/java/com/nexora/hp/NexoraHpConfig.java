@@ -29,6 +29,9 @@ public final class NexoraHpConfig {
     public static boolean avoidRagnarock = true;
     public static boolean panicEnabled = true;
     public static int panicThresholdPercent = 25;
+    public static boolean showAttunement = true;
+    public static boolean autoAttunementEnabled = true;
+    public static int attunementSwitchDelayMillis = 1000;
 
     private NexoraHpConfig() {
     }
@@ -53,6 +56,12 @@ public final class NexoraHpConfig {
         avoidRagnarock = Boolean.parseBoolean(props.getProperty("avoidRagnarock", String.valueOf(avoidRagnarock)));
         panicEnabled = Boolean.parseBoolean(props.getProperty("panicEnabled", String.valueOf(panicEnabled)));
         panicThresholdPercent = clamp(parseInt(props.getProperty("panicThresholdPercent"), panicThresholdPercent), 5, 90);
+        showAttunement = Boolean.parseBoolean(props.getProperty("showAttunement", String.valueOf(showAttunement)));
+        autoAttunementEnabled = Boolean.parseBoolean(
+                props.getProperty("autoAttunementEnabled", String.valueOf(autoAttunementEnabled)));
+        attunementSwitchDelayMillis = clamp(
+                parseInt(props.getProperty("attunementSwitchDelayMillis"), attunementSwitchDelayMillis),
+                AttunementController.MIN_CONFIRM_WINDOW_MILLIS, AttunementController.MAX_CONFIRM_WINDOW_MILLIS);
     }
 
     public static void save() {
@@ -65,6 +74,9 @@ public final class NexoraHpConfig {
         props.setProperty("avoidRagnarock", String.valueOf(avoidRagnarock));
         props.setProperty("panicEnabled", String.valueOf(panicEnabled));
         props.setProperty("panicThresholdPercent", String.valueOf(panicThresholdPercent));
+        props.setProperty("showAttunement", String.valueOf(showAttunement));
+        props.setProperty("autoAttunementEnabled", String.valueOf(autoAttunementEnabled));
+        props.setProperty("attunementSwitchDelayMillis", String.valueOf(attunementSwitchDelayMillis));
 
         try (OutputStream out = Files.newOutputStream(CONFIG_PATH)) {
             props.store(out, "Nexora HP settings");
