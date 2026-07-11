@@ -36,6 +36,7 @@ public final class NexoraHpConfig {
     public static final boolean DEFAULT_AUTO_ATTUNEMENT_ENABLED = true;
     public static final int DEFAULT_ATTUNEMENT_SWITCH_DELAY_MILLIS = 1000;
     public static final boolean DEFAULT_AUTO_SOULCRY_ENABLED = true;
+    public static final boolean DEFAULT_AUTO_DEPLOYABLE_ENABLED = true;
     public static final boolean DEFAULT_AUTO_CAKE_ENABLED = true;
 
     public static boolean enabled = DEFAULT_ENABLED;
@@ -51,6 +52,7 @@ public final class NexoraHpConfig {
     public static boolean autoAttunementEnabled = DEFAULT_AUTO_ATTUNEMENT_ENABLED;
     public static int attunementSwitchDelayMillis = DEFAULT_ATTUNEMENT_SWITCH_DELAY_MILLIS;
     public static boolean autoSoulcryEnabled = DEFAULT_AUTO_SOULCRY_ENABLED;
+    public static boolean autoDeployableEnabled = DEFAULT_AUTO_DEPLOYABLE_ENABLED;
     public static boolean autoCakeEnabled = DEFAULT_AUTO_CAKE_ENABLED;
 
     private NexoraHpConfig() {
@@ -85,6 +87,8 @@ public final class NexoraHpConfig {
                 AttunementController.MIN_CONFIRM_WINDOW_MILLIS, AttunementController.MAX_CONFIRM_WINDOW_MILLIS);
         autoSoulcryEnabled = Boolean.parseBoolean(
                 props.getProperty("autoSoulcryEnabled", String.valueOf(autoSoulcryEnabled)));
+        autoDeployableEnabled = Boolean.parseBoolean(
+                props.getProperty("autoDeployableEnabled", String.valueOf(autoDeployableEnabled)));
         autoCakeEnabled = Boolean.parseBoolean(props.getProperty("autoCakeEnabled", String.valueOf(autoCakeEnabled)));
     }
 
@@ -103,6 +107,7 @@ public final class NexoraHpConfig {
         props.setProperty("autoAttunementEnabled", String.valueOf(autoAttunementEnabled));
         props.setProperty("attunementSwitchDelayMillis", String.valueOf(attunementSwitchDelayMillis));
         props.setProperty("autoSoulcryEnabled", String.valueOf(autoSoulcryEnabled));
+        props.setProperty("autoDeployableEnabled", String.valueOf(autoDeployableEnabled));
         props.setProperty("autoCakeEnabled", String.valueOf(autoCakeEnabled));
 
         try (OutputStream out = Files.newOutputStream(CONFIG_PATH)) {

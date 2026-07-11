@@ -181,6 +181,12 @@ public class NexoraHpConfigScreen extends Screen {
                                 NexoraHpConfig.panicThresholdPercent,
                                 percent -> NexoraHpConfig.panicThresholdPercent = percent)))));
 
+        out.add(new Section(Tab.SLAYER, "GENERAL", List.of(
+                new Setting("auto deployable orb flare slayer place power radiant mana overflux plasmaflux warning alert sos",
+                        "When a slayer boss starts spawning, place whatever orb or flare is in your hotbar (looks down, places, looks back).",
+                        (x, y, w, h) -> toggle(x, y, w, h, NexoraHpConfigScreen::autoDeployableLabel,
+                                () -> NexoraHpConfig.autoDeployableEnabled = !NexoraHpConfig.autoDeployableEnabled)))));
+
         out.add(new Section(Tab.SLAYER, "BLAZE SLAYER", List.of(
                 new Setting("auto attunement dagger switch blaze slayer hellion shield",
                         "Auto-switch and toggle your daggers to match the boss's Hellion Shield attunement.",
@@ -352,6 +358,7 @@ public class NexoraHpConfigScreen extends Screen {
                 NexoraHpConfig.panicThresholdPercent = NexoraHpConfig.DEFAULT_PANIC_THRESHOLD_PERCENT;
             }
             case SLAYER -> {
+                NexoraHpConfig.autoDeployableEnabled = NexoraHpConfig.DEFAULT_AUTO_DEPLOYABLE_ENABLED;
                 NexoraHpConfig.autoAttunementEnabled = NexoraHpConfig.DEFAULT_AUTO_ATTUNEMENT_ENABLED;
                 NexoraHpConfig.attunementSwitchDelayMillis = NexoraHpConfig.DEFAULT_ATTUNEMENT_SWITCH_DELAY_MILLIS;
                 NexoraHpConfig.showAttunement = NexoraHpConfig.DEFAULT_SHOW_ATTUNEMENT;
@@ -537,5 +544,9 @@ public class NexoraHpConfigScreen extends Screen {
 
     private static Component autoSoulcryLabel() {
         return Component.literal("Auto Soulcry: " + (NexoraHpConfig.autoSoulcryEnabled ? "ON" : "OFF"));
+    }
+
+    private static Component autoDeployableLabel() {
+        return Component.literal("Auto Deployable: " + (NexoraHpConfig.autoDeployableEnabled ? "ON" : "OFF"));
     }
 }

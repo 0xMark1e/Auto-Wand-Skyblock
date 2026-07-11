@@ -183,7 +183,7 @@ final class NexoraDebugCommands {
                 continue;
             }
             occupied++;
-            String id = NexoraHpMod.extraAttributesId(stack);
+            String id = SkyblockItems.id(stack);
             sb.append("slot ").append(slot).append(": ").append(stack.getItem())
                     .append(" x").append(stack.getCount())
                     .append(id.isEmpty() ? "" : " id=" + id)

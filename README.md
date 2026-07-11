@@ -39,9 +39,16 @@ state directly, so it behaves identically in singleplayer and multiplayer.
   you'd use by hand. Debounced against nametag flicker, backs off after
   repeated failed attempts instead of spamming, and won't fire mid-panic-heal
   or while holding Ragnarock (if avoidance is on).
+- **`/testtext <message>`** — flashes the message as a big neon-pink
+  announcement title in the upper middle of the screen.
 - **`/showhp`** — prints current/max HP to chat.
 - **`/getid`** — prints the internal Skyblock item ID of whatever you're
   currently holding, for figuring out an item's ID.
+- **Auto deployable** — the moment any slayer boss starts spawning (the
+  sidebar flips to "Slay the boss!"), places whatever orb or flare is in
+  your hotbar: switches to it, looks down, right-clicks, then restores
+  your view and slot. Matches every tier of both families (Radiant/Mana
+  Flux/Overflux/Plasmaflux orbs, Warning/Alert/SOS flares), once per boss.
 - **Auto Soulcry** — while fighting a Voidgloom Seraph with any of the
   three slayer katanas (Voidedge, Voidwalker, Vorpal), re-casts the
   katana's Soulcry ability as soon as it expires, keeping the +200
@@ -112,6 +119,7 @@ Settings live in `config/nexora-heal.properties` and are editable in-game via
 | Auto Attunement | Master on/off toggle for Blaze Slayer dagger auto-switching |
 | Swap Delay | How long to wait between toggle attempts (ms) |
 | Show Attunement | Toggle the boss's current attunement in the HUD |
+| Auto Deployable | Place your hotbar orb/flare when a slayer boss spawns |
 | Auto Soulcry | Keep the katana's Soulcry buff active during Voidgloom fights |
 | Auto Cake | Auto-collect cakes gifted to you (Misc tab) |
 
